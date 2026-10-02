@@ -1,0 +1,101 @@
+name: Build Fedora
+
+on:
+  workflow_dispatch:
+    inputs:
+      fedora-version:
+        description: 'Fedora image tag (e.g. 43, 44, latest)'
+        type: string
+        default: 'latest'
+  push:
+    branches:
+      - main
+    paths:
+      - 'deps/**'
+      - 'deps_src/**'
+      - 'src/**'
+      - '**/CMakeLists.txt'
+      - 'version.inc'
+      - 'localization/**'
+      - 'resources/**'
+      - 'build_linux.sh'
+      - 'scripts/linux.d/fedora'
+      - '.github/workflows/build_fedora.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Fedora ${{ inputs.fedora-version || 'latest' }} x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    container:
+      image: registry.fedoraproject.org/fedora:${{ inputs.fedora-version || 'latest' }}
+      # Host toolchains mounted so they can be deleted to free disk for the deps build.
+      volumes:
+        - /usr/local/lib/android:/usr/local/lib/android
+        - /usr/share/dotnet:/usr/share/dotnet
+        - /opt/ghc:/opt/ghc1
+        - /opt/hostedtoolcache:/opt/hostedtoolcache1
+    steps:
+      - name: Free disk space
+        run: rm -rf /usr/local/lib/android/* /usr/share/dotnet/* /opt/ghc1/* /opt/hostedtoolcache1/*
+
+      # git/tar/zstd are needed by checkout and cache; sudo by scripts/linux.d/fedora.
+      - name: Install base tools
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            sudo git tar zstd gzip xz bzip2 patch which findutils procps-ng \
+            ccache python3 perl-IPC-Cmd perl-Time-Piece
+
+      - uses: actions/checkout@v7
+
+      - name: Install build dependencies
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          ./build_linux.sh -u
+
+      - name: Compute cache keys
+        id: keys
+        run: |
+          fedora_ver=$(. /etc/os-release && echo "$VERSION_ID")
+          echo "fedora=$fedora_ver" >> "$GITHUB_OUTPUT"
+          echo "deps=fedora-$fedora_ver-deps-${{ hashFiles('deps/**', 'scripts/linux.d/fedora') }}" >> "$GITHUB_OUTPUT"
+          echo "ver=$(grep 'set(SoftFever_VERSION' version.inc | cut -d '"' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore dependencies
+        id: deps-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: deps/build/OrcaSlicer_dep
+          key: ${{ steps.keys.outputs.deps }}
+
+      - name: Build dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: ./build_linux.sh -dr
+
+      # Saved before the app build so a failing app build still keeps the deps.
+      - name: Save dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: deps/build/OrcaSlicer_dep
+          key: ${{ steps.keys.outputs.deps }}
+
+      - name: Build OrcaSlicer
+        run: ./build_linux.sh -sr
+
+      - name: Package
+        id: package
+        run: |
+          name="OrcaSlicer_Fedora${{ steps.keys.outputs.fedora }}_x86_64_V${{ steps.keys.outputs.ver }}"
+          tar -C build -czf "$name.tar.gz" --transform "s,^package,$name," package
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.name }}.tar.gz
+          retention-days: 30
