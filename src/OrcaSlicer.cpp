@@ -1255,6 +1255,10 @@ int CLI::run(int argc, char **argv)
     // XWayland sessions as a conservative fallback for older WebKit.
     // ------------------------------------------------------------------
     {
+        // WebKitGTK's DMA-BUF renderer aborts the web process on GPUs/drivers where it
+        // cannot create a GBM EGL display (e.g. NVIDIA, hybrid laptops). Set to 0 to re-enable.
+        ::setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", /* replace */ false);
+
         const char* gdk_backend = ::getenv("GDK_BACKEND");
         // Match "x11" and comma-prefixed forms like "x11,wayland" (GTK
         // honours the first backend in the comma-separated list).
